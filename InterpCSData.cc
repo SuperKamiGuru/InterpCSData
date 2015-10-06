@@ -13,6 +13,7 @@ using namespace std;
 #include "include/ElementNames.hh"
 #include "zlib.h"
 #include <iomanip>
+#include <cfloat>
 
 
 void GetClosestTempFileList(string inFileName, string outFileName, stringstream& streamMCNP, std::vector<string> &inFileListLow,
@@ -35,8 +36,8 @@ bool ConvertFile(string inDirName, string outDirName, string fileName, double pr
 void ExtractZA(string fileName, int &Z, int &A);
 int DoppBroad(string inFileLow, string inFileHigh, string outFile, double prevTempLow, double prevTempHigh, double newTemp, bool ascii, bool overWrite);
 double findCS(double nKEnerTrans, const double* prevEnVec, const double* prevCSVec, int vecSize);
-void GetDataStream( string, std::stringstream&);
-void SetDataStream( string, std::stringstream&, bool ascii);
+void GetDataStream( string, std::stringstream&, bool suppress=false);
+void SetDataStream( string, std::stringstream&, bool ascii, bool overWrite);
 double Linear(double x, double x1, double x2, double y1, double y2);
 
 std::ofstream *logFileData=NULL;
@@ -204,7 +205,8 @@ void GetClosestTempFileList(string inFileName, string outFileName, stringstream&
     double tempBestLow[4]={0.,0.,0.,0.};
     double tempBestHigh[4]={0.,0.,0.,0.};
     std::vector<string> allFiles, matchList;
-    bool check[4]={false, false, false, false};
+    bool checkLow[4]={false, false, false, false};
+    bool checkHigh[4]={false, false, false, false};
     string process[4]={"Capture","Elastic","Fission","Inelastic"};
 
     streamMCNP >> numIso;
@@ -214,10 +216,12 @@ void GetClosestTempFileList(string inFileName, string outFileName, stringstream&
     {
         streamMCNP >> isoName >> temp >> nameTemp;
         ExtractZA(isoName,Z,A);
+        if((Z==-1)||(A==-1))
+            continue;
         for(int j=0; j<4; j++)
         {
-            check[j]=false;
-            tempBestLow[j]=-1.;
+            checkLow[j]=false;
+            tempBestLow[j]=-DBL_MAX;
         }
         for(int j=0; j<int(allFiles.size()); j++)
         {
@@ -230,13 +234,13 @@ void GetClosestTempFileList(string inFileName, string outFileName, stringstream&
                 {
                     if(FindProcess(allFiles[j], index))
                     {
-                        if(((temp-tempBestLow[index])>=(temp-tempMatch))&&(tempMatch<=temp))
+                        if((abs(temp-tempBestLow[index])>=abs(temp-tempMatch))&&(tempMatch<=temp))
                         {
                             if(CompleteFile(allFiles[j]))
                             {
                                 tempBestLow[index] = tempMatch;
                                 bestLow[index] = j;
-                                check[index] = true;
+                                checkLow[index] = true;
                             }
                         }
                     }
@@ -245,8 +249,8 @@ void GetClosestTempFileList(string inFileName, string outFileName, stringstream&
         }
         for(int j=0; j<4; j++)
         {
-            check[j]=false;
-            tempBestHigh[j]=-1.;
+            checkHigh[j]=false;
+            tempBestHigh[j]=DBL_MAX;
         }
         for(int j=0; j<int(allFiles.size()); j++)
         {
@@ -259,13 +263,13 @@ void GetClosestTempFileList(string inFileName, string outFileName, stringstream&
                 {
                     if(FindProcess(allFiles[j], index))
                     {
-                        if(((temp-tempBestHigh[index])>=(temp-tempMatch))&&(tempMatch>=temp))
+                        if((abs(temp-tempBestHigh[index])>=abs(temp-tempMatch))&&(tempMatch>=temp))
                         {
                             if(CompleteFile(allFiles[j]))
                             {
                                 tempBestHigh[index] = tempMatch;
                                 bestHigh[index] = j;
-                                check[index] = true;
+                                checkHigh[index] = true;
                             }
                         }
                     }
@@ -274,8 +278,19 @@ void GetClosestTempFileList(string inFileName, string outFileName, stringstream&
         }
         for(int k=0; k<4; k++)
         {
-            if(check[k])
+            if(checkLow[k]||checkHigh[k])
             {
+                if(!checkHigh[k])
+                {
+                    tempBestHigh[k]=tempBestLow[k];
+                    bestHigh[k]=bestLow[k];
+                }
+                else if(!checkLow[k])
+                {
+                    tempBestLow[k]=tempBestHigh[k];
+                    bestLow[k]=bestHigh[k];
+                }
+
                 newTempList.push_back(temp);
                 inFileListLow.push_back(allFiles[bestLow[k]]);
                 inFileListHigh.push_back(allFiles[bestHigh[k]]);
@@ -292,6 +307,23 @@ void GetClosestTempFileList(string inFileName, string outFileName, stringstream&
             }
         }
     }
+
+    for(int i=0; i<int(inFileListLow.size()); i++)
+    {
+        for(int j=i+1; j<int(inFileListLow.size()); j++)
+        {
+            if((inFileListLow[i]==inFileListLow[j])&&(newTempList[i]==newTempList[j])&&(outFileList[i]==outFileList[j]))
+            {
+                newTempList.erase(newTempList.begin()+j);
+                inFileListLow.erase(inFileListLow.begin()+j);
+                inFileListHigh.erase(inFileListHigh.begin()+j);
+                prevTempListLow.erase(prevTempListLow.begin()+j);
+                prevTempListHigh.erase(prevTempListHigh.begin()+j);
+                outFileList.erase(outFileList.begin()+j);
+                j--;
+            }
+        }
+    }
 }
 
 //GetAllFiles
@@ -301,6 +333,15 @@ bool GetAllFiles(string inFileName, std::vector<string> &inFileList)
     DIR *dir;
     struct dirent *ent;
     string name;
+    bool csDir=false;
+    int pos1, pos2;
+
+    pos1=inFileName.find_last_of('/');
+    pos2=inFileName.find_last_of('/', pos1-1);
+    if((pos2!=int(inFileName.length()))&&(inFileName.substr(pos2+1, pos1-pos2)=="CrossSection/"))
+    {
+        csDir=true;
+    }
 
     if ((dir = opendir (inFileName.c_str())) != NULL)
     {
@@ -312,7 +353,7 @@ bool GetAllFiles(string inFileName, std::vector<string> &inFileList)
             {
 
             }
-            else
+            else if(csDir)
             {
                 inFileList.push_back(inFileName+ent->d_name);
             }
@@ -456,7 +497,7 @@ bool FindProcess(string fileName, int &process)
 bool CompleteFile(string fileName)
 {
     stringstream stream;
-    GetDataStream( fileName, stream);
+    GetDataStream( fileName, stream, true);
     int count=0, numPoints;
     double dummy;
 
@@ -779,7 +820,7 @@ void ExtractZA(string fileName, int &Z, int &A)
 
         if(startPos==fileName.length())
         {
-            cout << "### File Name Does Not Contian a Z or an A Value " << fileName << " is Invalid for Broadening ###" << endl;
+            //cout << "### File Name Does Not Contian a Z or an A Value " << fileName << " is Invalid for Broadening ###" << endl;
             Z=A=-1;
         }
         else
@@ -788,8 +829,8 @@ void ExtractZA(string fileName, int &Z, int &A)
             std::size_t found1 = fileName.find_first_of('_', startPos);
             if (found1==std::string::npos)
             {
-                cout << "### File Name Does Not Contian a '_', two are needed, one to seperate the Z and A value, \
-                and one to seperate the A and the Element name " << fileName << " is Invalid for Broadening ###" << endl;
+                /*cout << "### File Name Does Not Contian a '_', two are needed, one to seperate the Z and A value, \
+                and one to seperate the A and the Element name " << fileName << " is Invalid for Broadening ###" << endl;*/
                 Z=A=-1;
             }
             else
@@ -797,8 +838,8 @@ void ExtractZA(string fileName, int &Z, int &A)
                 std::size_t found2 = fileName.find_first_of('_', found1+1);
                 if (found2==std::string::npos)
                 {
-                    cout << "### File Name Does Not Contian a second '_', two are needed, one to seperate the Z and A value, \
-                    and one to seperate the A and the Element name " << fileName << " is Invalid for Broadening ###" << endl;
+                    /*cout << "### File Name Does Not Contian a second '_', two are needed, one to seperate the Z and A value, \
+                    and one to seperate the A and the Element name " << fileName << " is Invalid for Broadening ###" << endl;*/
                     Z=A=-1;
                 }
                 else
@@ -818,7 +859,7 @@ void ExtractZA(string fileName, int &Z, int &A)
                     ss.str(fileName.substr(found2+1));
                     if (!(elementNames->CheckName(ss.str(), Z)))
                     {
-                        cout << "### " << fileName << " does not include the correct element name at the end ###" << endl;
+                        //cout << "### " << fileName << " does not include the correct element name at the end ###" << endl;
                         Z=A=-1;
                     }
                     ss.str("");
@@ -834,14 +875,31 @@ void ExtractZA(string fileName, int &Z, int &A)
 //Doppler broadens the given file
 int DoppBroad(string inFileLow, string inFileHigh, string outFile, double prevTempLow, double prevTempHigh, double newTemp, bool ascii, bool overWrite)
 {
+    stringstream stream;
+
 	if (inFileLow==inFileHigh)
 	{
-        return 0;
+        if((prevTempLow==newTemp)&&(CompleteFile(outFile)))
+        {
+            return 0;
+        }
+        else
+        {
+            GetDataStream(inFileLow, stream);
+            if(stream.good())
+            {
+                SetDataStream(outFile, stream, ascii, overWrite);
+                return 0;
+            }
+            else
+            {
+                return 1;
+            }
+        }
     }
 
-    double tempRatio = (newTemp-prevTempLow)/(newTemp-prevTempHigh);
+    double tempRatio = (newTemp-prevTempLow)/(prevTempHigh-prevTempLow);
 
-    stringstream stream;
     GetDataStream(inFileLow, stream);
 
     int tableSize, vType;
@@ -986,7 +1044,7 @@ int DoppBroad(string inFileLow, string inFileHigh, string outFile, double prevTe
 
     stream << '\n';
 
-    SetDataStream( outFile, stream, ascii);
+    SetDataStream( outFile, stream, ascii, overWrite);
 
     stream.str("");
     delete [] prevCSVecLow;
@@ -1008,7 +1066,7 @@ double Linear(double x, double x1, double x2, double y1, double y2)
 
 //GetDataStream
 //Gets the contents of the given file and puts it into a data stream
-void GetDataStream( string filename , std::stringstream& ss)
+void GetDataStream( string filename , std::stringstream& ss, bool suppress)
 {
    string* data=NULL;
    std::ifstream* in=NULL;
@@ -1077,7 +1135,8 @@ void GetDataStream( string filename , std::stringstream& ss)
 // found no data file
 //                 set error bit to the stream
          ss.setstate( std::ios::badbit );
-         cout << endl << "### failed to open ascii file " << filename << " ###" << endl;
+         if(!suppress)
+            cout << endl << "### failed to open ascii file " << filename << " ###" << endl;
       }
    }
    if (data != NULL)
@@ -1099,7 +1158,7 @@ void GetDataStream( string filename , std::stringstream& ss)
 
 //SetDataStream
 //opens the given file and stores the data contianed with in the given stream inside of it
-void SetDataStream( string filename , std::stringstream& ss, bool ascii )
+void SetDataStream( string filename , std::stringstream& ss, bool ascii, bool overWrite )
 {
     //bool cond=true;
    if (!ascii)
@@ -1108,8 +1167,13 @@ void SetDataStream( string filename , std::stringstream& ss, bool ascii )
 
         if(compfilename.back()!='z')
             compfilename += ".z";
-
-       std::ofstream* out = new std::ofstream ( compfilename.c_str() , std::ios::binary | std::ios::trunc);
+        std::ofstream* out;
+        if(overWrite||(!CompleteFile(filename)))
+            out = new std::ofstream ( compfilename.c_str() , std::ios::binary | std::ios::trunc);
+        else
+        {
+            return;
+        }
        if ( ss.good() )
        {
        //
